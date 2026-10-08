@@ -67,24 +67,24 @@
         
         // テンプレートとしての初期データ
         const defaultContactsTemplate = {
-            fire: { name: '消防・救急', number: '119', color: 'bg-red-500 border-red-600 text-white', img: 'IMG_1583_2.PNG', editableName: false, editableImg: true },
+            fire: { name: '消防・救急', number: '119', color: 'bg-red-500 border-red-600 text-white', img: 'IMG_1583.PNG', editableName: false, editableImg: true },
             police: { name: '警察', number: '110', color: 'bg-blue-600 border-blue-700 text-white', img: 'IMG_1584.png', editableName: false, editableImg: true },
-            hospital: { name: '病院', number: '', color: 'bg-white border-rose-200 text-slate-800', img: 'image_0.png', editableName: true, editableImg: true },
-            electric: { name: '沖縄電力', number: '', color: 'bg-white border-yellow-300 text-slate-800', img: 'image_5.png', editableName: true, editableImg: true },
-            labor: { name: '労働基準監督署', number: '', color: 'bg-white border-indigo-200 text-slate-800', img: 'image_6.png', editableName: true, editableImg: true },
-            ntt: { name: 'NTT故障受付', number: '', color: 'bg-white border-teal-200 text-slate-800', img: 'image_7.png', editableName: true, editableImg: true },
+            hospital: { name: '病院', number: '', color: 'bg-white border-rose-200 text-slate-800', img: 'IMG_1587.jpg', editableName: true, editableImg: true },
+            electric: { name: '沖縄電力', number: '', color: 'bg-white border-yellow-300 text-slate-800', img: 'IMG_1578.JPG', editableName: true, editableImg: true },
+            labor: { name: '労働基準監督署', number: '', color: 'bg-white border-indigo-200 text-slate-800', img: 'IMG_1573.GIF', editableName: true, editableImg: true },
+            ntt: { name: 'NTT故障受付', number: '', color: 'bg-white border-teal-200 text-slate-800', img: 'IMG_1579.GIF', editableName: true, editableImg: true },
             water: { name: '水道局', number: '', color: 'bg-white border-cyan-200 text-slate-800', img: 'water_icon.png', editableName: true, editableImg: true },
             // 工事関係者
-            agent: { name: '現場代理人', personName: '', number: '', color: 'bg-white border-blue-300 text-slate-800', img: '現場代理人.png', editableName: true, editableImg: true },
-            company: { name: '有志建設', number: '', color: 'bg-white border-emerald-300 text-slate-800', img: 'image_8.png', editableName: true, editableImg: true },
-            supervisor: { name: '工事監理者', number: '', color: 'bg-white border-slate-300 text-slate-800', img: 'image_1.png', editableName: true, editableImg: true },
-            client: { name: '発注者', number: '', color: 'bg-white border-slate-300 text-slate-800', img: 'image_2.png', editableName: true, editableImg: true }
+            agent: { name: '現場代理人', personName: '', number: '', color: 'bg-white border-blue-300 text-slate-800', img: 'genbadai.png', editableName: true, editableImg: true },
+            company: { name: '有志建設', number: '', color: 'bg-white border-emerald-300 text-slate-800', img: 'yushi.JPEG', editableName: true, editableImg: true },
+            supervisor: { name: '工事監理者', number: '', color: 'bg-white border-slate-300 text-slate-800', img: 'IMG_1586.JPG', editableName: true, editableImg: true },
+            client: { name: '発注者', number: '', color: 'bg-white border-slate-300 text-slate-800', img: 'IMG_1585.JPG', editableName: true, editableImg: true }
         };
 
         // アプリの状態
         let state = {
             currentSiteId: DEFAULT_SITE_ID,
-            siteName: 'メイン現場',
+            siteName: 'デフォルト現場',
             contacts: JSON.parse(JSON.stringify(defaultContactsTemplate)),
             isEditing: false,
             tempData: null, // 編集中の一時データ { siteName, contacts }
