@@ -1,0 +1,1058 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>緊急連絡一覧アプリ</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- QRコード生成ライブラリ -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+    <style>
+        /* スマホタップ時の青いハイライトを消す設定 */
+        body { -webkit-tap-highlight-color: transparent; }
+        /* スムーズなアニメーション用 */
+        .btn-active:active {
+            transform: translateY(6px);
+            box-shadow: 0 0px 0 rgba(0,0,0,0) !important;
+        }
+        
+        /* 画像の統一感のためのスタイル */
+        .icon-container {
+            width: 100%;
+            height: 56px; /* h-14 equivalent */
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-bottom: 0.5rem;
+        }
+        .icon-container img {
+            max-height: 100%;
+            max-width: 100%;
+            object-fit: contain;
+        }
+    </style>
+</head>
+<body class="bg-slate-100 font-sans text-slate-900 pb-24 min-h-screen">
+
+    <!-- Firebase SDK (ES Modules) -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, getDoc, collection, getDocs, onSnapshot, deleteDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // === ⚠️ Firebase Configuration ===
+        // ご自身のFirebaseプロジェクトの設定に書き換えてください。
+        // ※このままでも動作確認用に一時的に動く場合がありますが、本番運用には必須です。
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {apiKey: "AIzaSyA7NwyXGJ3q8JsAkv2TFYmyoLySas1g1LI",
+  authDomain: "emergency-app-7395f.firebaseapp.com",
+  projectId: "emergency-app-7395f",
+  storageBucket: "emergency-app-7395f.firebasestorage.app",
+  messagingSenderId: "1098407596645",
+  appId: "1:1098407596645:web:7ee9bfdaabb9fca6706c8c"
+        };
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'emergency-contacts-app';
+
+        // Firebase Initialization
+        let app, auth, db;
+        try {
+            app = initializeApp(firebaseConfig);
+            auth = getAuth(app);
+            db = getFirestore(app);
+        } catch(e) {
+            console.warn("Firebase config not set or invalid. Falling back to local storage only for preview.", e);
+        }
+
+        // --- Data Structure & Defaults ---
+        const DEFAULT_SITE_ID = 'default_site';
+        
+        // テンプレートとしての初期データ
+        const defaultContactsTemplate = {
+            fire: { name: '消防・救急', number: '119', color: 'bg-red-500 border-red-600 text-white', img: 'IMG_1583_2.PNG', editableName: false, editableImg: true },
+            police: { name: '警察', number: '110', color: 'bg-blue-600 border-blue-700 text-white', img: 'IMG_1584.png', editableName: false, editableImg: true },
+            hospital: { name: '病院', number: '', color: 'bg-white border-rose-200 text-slate-800', img: 'image_0.png', editableName: true, editableImg: true },
+            electric: { name: '沖縄電力', number: '', color: 'bg-white border-yellow-300 text-slate-800', img: 'image_5.png', editableName: true, editableImg: true },
+            labor: { name: '労働基準監督署', number: '', color: 'bg-white border-indigo-200 text-slate-800', img: 'image_6.png', editableName: true, editableImg: true },
+            ntt: { name: 'NTT故障受付', number: '', color: 'bg-white border-teal-200 text-slate-800', img: 'image_7.png', editableName: true, editableImg: true },
+            water: { name: '水道局', number: '', color: 'bg-white border-cyan-200 text-slate-800', img: 'water_icon.png', editableName: true, editableImg: true },
+            // 工事関係者
+            agent: { name: '現場代理人', personName: '', number: '', color: 'bg-white border-blue-300 text-slate-800', img: '現場代理人.png', editableName: true, editableImg: true },
+            company: { name: '有志建設', number: '', color: 'bg-white border-emerald-300 text-slate-800', img: 'image_8.png', editableName: true, editableImg: true },
+            supervisor: { name: '工事監理者', number: '', color: 'bg-white border-slate-300 text-slate-800', img: 'image_1.png', editableName: true, editableImg: true },
+            client: { name: '発注者', number: '', color: 'bg-white border-slate-300 text-slate-800', img: 'image_2.png', editableName: true, editableImg: true }
+        };
+
+        // アプリの状態
+        let state = {
+            currentSiteId: DEFAULT_SITE_ID,
+            siteName: 'メイン現場',
+            contacts: JSON.parse(JSON.stringify(defaultContactsTemplate)),
+            isEditing: false,
+            tempData: null, // 編集中の一時データ { siteName, contacts }
+            availableSites: [{ id: DEFAULT_SITE_ID, name: 'メイン現場' }], // 登録済み現場リスト
+            userId: null
+        };
+
+        // グローバルスコープに公開する関数（HTML側のonclick等で呼ぶため）
+        window.appAPI = {};
+
+        // --- URLパラメータからの現場ID読み込み ---
+        function getSiteIdFromUrl() {
+            try {
+                const params = new URLSearchParams(window.location.search);
+                return params.get('site');
+            } catch (e) {
+                return null;
+            }
+        }
+
+        function updateUrlWithSiteId(siteId) {
+            if(!siteId || siteId === DEFAULT_SITE_ID) return;
+            try {
+                // プレビュー環境（blob URL等）ではHistory APIの書き換えがエラーになるためスキップ
+                if (window.location.protocol === 'blob:' || window.location.protocol === 'data:') {
+                    return;
+                }
+                const newUrl = window.location.protocol + "//" + window.location.host + window.location.pathname + '?site=' + siteId;
+                window.history.pushState({path:newUrl}, '', newUrl);
+            } catch(e) {
+                console.warn("現在の環境ではURLの書き換えがサポートされていません:", e);
+            }
+        }
+
+        // --- Firebase Data Fetching ---
+        async function fetchSiteData(siteId) {
+            if (!db) {
+                // ローカルストレージフォールバック
+                const localData = localStorage.getItem(`emergency_data_${siteId}`);
+                if (localData) {
+                    const parsed = JSON.parse(localData);
+                    state.contacts = parsed.contacts || JSON.parse(JSON.stringify(defaultContactsTemplate));
+                    state.siteName = parsed.siteName || '名称未設定';
+                } else {
+                     state.contacts = JSON.parse(JSON.stringify(defaultContactsTemplate));
+                     state.siteName = siteId === DEFAULT_SITE_ID ? 'メイン現場' : '新規現場';
+                }
+                // 編集モードを継続するためのデータ同期
+                if (state.isEditing) {
+                    state.tempData = JSON.parse(JSON.stringify({ siteName: state.siteName, contacts: state.contacts }));
+                }
+                renderApp();
+                return;
+            }
+
+            try {
+                // RULE 1: Use strictly artifacts/{appId}/public/data/sites
+                const siteRef = doc(db, 'artifacts', appId, 'public', 'data', 'sites', siteId);
+                const docSnap = await getDoc(siteRef);
+                
+                if (docSnap.exists()) {
+                    const data = docSnap.data();
+                    state.contacts = mergeWithTemplate(data.contacts);
+                    state.siteName = data.siteName || '名称未設定';
+                } else {
+                    // ドキュメントが存在しない場合は新規作成状態
+                    state.contacts = JSON.parse(JSON.stringify(defaultContactsTemplate));
+                    state.siteName = siteId === DEFAULT_SITE_ID ? 'メイン現場' : '新規現場';
+                }
+                // 編集モードを継続するためのデータ同期
+                if (state.isEditing) {
+                    state.tempData = JSON.parse(JSON.stringify({ siteName: state.siteName, contacts: state.contacts }));
+                }
+                renderApp();
+            } catch (error) {
+                console.warn("Error fetching site data, falling back to local:", error.message);
+                const localData = localStorage.getItem(`emergency_data_${siteId}`);
+                if (localData) {
+                    const parsed = JSON.parse(localData);
+                    state.contacts = parsed.contacts || JSON.parse(JSON.stringify(defaultContactsTemplate));
+                    state.siteName = parsed.siteName || '名称未設定';
+                } else {
+                     state.contacts = JSON.parse(JSON.stringify(defaultContactsTemplate));
+                     state.siteName = siteId === DEFAULT_SITE_ID ? 'メイン現場' : '新規現場';
+                }
+                // 編集モードを継続するためのデータ同期
+                if (state.isEditing) {
+                    state.tempData = JSON.parse(JSON.stringify({ siteName: state.siteName, contacts: state.contacts }));
+                }
+                renderApp(); // エラー時もとりあえず描画
+            }
+        }
+
+        // テンプレートにない項目（新規追加されたものなど）を補完する
+        function mergeWithTemplate(savedContacts) {
+            if(!savedContacts) return JSON.parse(JSON.stringify(defaultContactsTemplate));
+            let merged = JSON.parse(JSON.stringify(defaultContactsTemplate));
+            for (const key in savedContacts) {
+                if (merged[key]) {
+                    merged[key] = { ...merged[key], ...savedContacts[key] };
+                }
+            }
+            return merged;
+        }
+
+        async function fetchAvailableSites() {
+            if(!db) {
+                 const localList = localStorage.getItem('emergency_sites_list');
+                 if(localList) state.availableSites = JSON.parse(localList);
+                 return;
+            }
+            try {
+                 // RULE 2: No complex queries. Fetch all and filter/sort in memory.
+                 const sitesCol = collection(db, 'artifacts', appId, 'public', 'data', 'sites');
+                 const snapshot = await getDocs(sitesCol);
+                 let sites = [];
+                 snapshot.forEach(doc => {
+                     const data = doc.data();
+                     sites.push({ 
+                         id: doc.id, 
+                         name: data.siteName || doc.id,
+                         agentName: data.contacts?.agent?.personName || data.contacts?.agent?.name || '',
+                         supervisorName: data.contacts?.supervisor?.name || '',
+                         clientName: data.contacts?.client?.name || ''
+                     });
+                 });
+                 if(sites.length > 0) {
+                     state.availableSites = sites;
+                 } else {
+                     state.availableSites = [{ id: DEFAULT_SITE_ID, name: 'メイン現場' }];
+                 }
+            } catch (error) {
+                console.error("Error fetching available sites:", error);
+            }
+        }
+
+        // --- 編集モード専用のボタン生成 ---
+        function createEditModeButton(id, contact, isFullWidth = false) {
+            const widthClass = isFullWidth ? 'col-span-2' : '';
+            const scale = contact.imgScale || 1.0;
+            
+            // 水道局のSVGフォールバック処理
+            const waterSvg = `
+                <svg viewBox="0 0 64 64" class="w-full h-full" fill="none" stroke="#0ea5e9" stroke-width="3" stroke-linejoin="round">
+                    <path d="M32 10C32 10 14 34 14 44C14 53.941 22.059 62 32 62C41.941 62 50 53.941 50 44C50 34 32 10 32 10Z" fill="#38bdf8" />
+                    <path d="M24 44C24 40 28 36 32 36" stroke="white" stroke-width="4" stroke-linecap="round" />
+                </svg>
+            `;
+
+            let imageContent = '';
+            if (id === 'water' && (!contact.img || contact.img === 'water_icon.png')) {
+                imageContent = `<div style="transform: scale(${scale}); width: 100%; height: 100%;">${waterSvg}</div>`;
+            } else {
+                imageContent = `<img src="${contact.img || ''}" alt="${contact.name}" style="transform: scale(${scale}); transition: transform 0.1s;" onerror="this.onerror=null; this.style.display='none';">`;
+            }
+
+            let personNameHtml = '';
+            if (id === 'agent' && contact.personName) {
+                personNameHtml = `<span class="text-xs text-slate-500 mt-1">${contact.personName}</span>`;
+            }
+
+            return `
+                <div class="${widthClass}">
+                    <button onclick="window.appAPI.openContactEditModal('${id}')" class="w-full relative flex flex-col items-center justify-center p-4 rounded-2xl shadow-[0_6px_0_rgba(0,0,0,0.15)] transition-all btn-active border-2 ${contact.color} h-full min-h-[140px]">
+                        <!-- 編集アイコンバッジ -->
+                        <div class="absolute -top-2 -right-2 bg-blue-500 rounded-full p-2 shadow-md border-2 border-white z-10 animate-pulse">
+                            <svg viewBox="0 0 24 24" class="w-4 h-4 text-white" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>
+                        </div>
+                        <div class="icon-container mb-2">
+                            ${imageContent}
+                        </div>
+                        <span class="font-bold text-lg text-center leading-tight">${contact.name}</span>
+                        ${personNameHtml}
+                    </button>
+                </div>
+            `;
+        }
+
+        // --- View Mode Rendering ---
+        function createViewButton(id, contact, isFullWidth = false) {
+            const isEmergency = id === 'fire' || id === 'police';
+            const hasNumber = contact.number && contact.number.trim().length > 0;
+            const widthClass = isFullWidth ? 'col-span-2' : '';
+            const opacityClass = (!hasNumber && !isEmergency) ? 'opacity-60 grayscale' : '';
+            const scale = contact.imgScale || 1.0;
+            
+            // 水道局のSVGフォールバック処理
+            const waterSvg = `
+                <svg viewBox="0 0 64 64" class="w-full h-full" fill="none" stroke="#0ea5e9" stroke-width="3" stroke-linejoin="round">
+                    <path d="M32 10C32 10 14 34 14 44C14 53.941 22.059 62 32 62C41.941 62 50 53.941 50 44C50 34 32 10 32 10Z" fill="#38bdf8" />
+                    <path d="M24 44C24 40 28 36 32 36" stroke="white" stroke-width="4" stroke-linecap="round" />
+                </svg>
+            `;
+
+            let imageContent = '';
+            if (id === 'water' && (!contact.img || contact.img === 'water_icon.png')) {
+                imageContent = `<div style="transform: scale(${scale}); width: 100%; height: 100%;">${waterSvg}</div>`;
+            } else {
+                imageContent = `<img src="${contact.img || ''}" alt="${contact.name}" style="transform: scale(${scale});" onerror="this.onerror=null; this.style.display='none';">`;
+            }
+
+            // 発信可能マーク
+            let badgeHTML = '';
+            if (hasNumber) {
+                badgeHTML = `
+                    <div class="absolute top-2 right-2 bg-green-500 rounded-full p-1.5 shadow-sm border-2 border-white">
+                        <svg viewBox="0 0 24 24" class="w-4 h-4 text-white" fill="currentColor"><path d="M20.01 15.38c-1.23 0-2.42-.2-3.53-.56a.977.977 0 00-1.01.24l-1.57 1.97c-2.83-1.35-5.48-3.9-6.89-6.83l1.95-1.66c.27-.28.35-.67.24-1.02-.37-1.11-.56-2.3-.56-3.53 0-.54-.45-.99-.99-.99H4.19C3.65 3 3 3.24 3 3.99 3 13.28 10.73 21 20.01 21c.71 0 .99-.63.99-1.18v-3.45c0-.54-.45-.99-.99-.99z"/></svg>
+                    </div>`;
+            }
+            
+            // 現場代理人用の氏名表示
+            let personNameHtml = '';
+            if (id === 'agent' && contact.personName) {
+                personNameHtml = `<span class="text-xs text-slate-500 mt-1">${contact.personName}</span>`;
+            }
+
+            return `
+                <div class="${widthClass}">
+                    <button onclick="window.appAPI.handleCallClick('${id}')" class="w-full relative flex flex-col items-center justify-center p-4 rounded-2xl shadow-[0_6px_0_rgba(0,0,0,0.15)] transition-all btn-active border-2 ${contact.color} ${opacityClass} h-full min-h-[140px]">
+                        <div class="icon-container mb-2">
+                            ${imageContent}
+                        </div>
+                        <span class="font-bold text-lg text-center leading-tight">${contact.name}</span>
+                        ${personNameHtml}
+                        ${badgeHTML}
+                    </button>
+                </div>
+            `;
+        }
+
+        function renderViewMode() {
+            const data = state.contacts;
+            
+            let html = `
+                <div class="max-w-md mx-auto p-4 space-y-6 pt-8">
+                    <!-- 現場名表示 -->
+                    <div class="text-center mb-4">
+                        <h1 class="text-2xl font-black text-slate-800 leading-tight">${state.siteName}</h1>
+                    </div>
+
+                    <!-- 上部グリッド (緊急・医療・インフラ) -->
+                    <div class="grid grid-cols-2 gap-4">
+                        ${createViewButton('fire', data.fire)}
+                        ${createViewButton('police', data.police)}
+                        ${createViewButton('hospital', data.hospital)}
+                        ${createViewButton('electric', data.electric)}
+                        ${createViewButton('labor', data.labor)}
+                        ${createViewButton('ntt', data.ntt)}
+                        ${createViewButton('water', data.water)}
+                        
+                        <!-- 登録・編集ボタン -->
+                        <div class="">
+                            <button onclick="window.appAPI.startEdit()" class="w-full relative flex flex-col items-center justify-center p-4 rounded-2xl shadow-[0_6px_0_rgba(0,0,0,0.15)] transition-all btn-active border-2 bg-slate-600 border-slate-700 text-white h-full min-h-[140px]">
+                                <svg viewBox="0 0 24 24" class="w-10 h-10 mb-2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"></path><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"></path></svg>
+                                <span class="font-bold text-lg tracking-wider text-center">登録・編集</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- 工事関係者セクション (2列2行) -->
+                    <div class="mt-8 border-2 border-slate-200 p-4 rounded-2xl bg-white shadow-sm">
+                        <h2 class="text-xl font-black mb-4 border-b-2 border-slate-100 pb-2 text-slate-600">工事関係者</h2>
+                        <div class="grid grid-cols-2 gap-4">
+                            ${createViewButton('agent', data.agent)}
+                            ${createViewButton('company', data.company)}
+                            ${createViewButton('supervisor', data.supervisor)}
+                            ${createViewButton('client', data.client)}
+                        </div>
+                    </div>
+                </div>
+            `;
+            return html;
+        }
+
+        // --- Edit Mode Rendering ---
+        function renderEditMode() {
+            const data = state.tempData.contacts;
+            
+            // 登録済み現場の選択肢
+            let siteListHTML = state.availableSites.map(site => {
+                const isCurrent = site.id === state.currentSiteId;
+                const borderClass = isCurrent ? 'border-blue-500 bg-blue-50' : 'border-slate-200 bg-slate-50 hover:bg-slate-100 cursor-pointer transition-colors';
+                
+                // 選択中の現場と、デフォルト現場は削除不可
+                const deleteBtn = (site.id !== DEFAULT_SITE_ID && !isCurrent) ? 
+                    `<button onclick="event.stopPropagation(); window.appAPI.deleteSite('${site.id}', '${site.name}')" class="p-2 text-slate-400 hover:text-red-600 active:bg-red-50 rounded-lg transition-colors"><svg viewBox="0 0 24 24" class="w-6 h-6" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg></button>` : '';
+
+                // 行全体をクリッカブルにする (選択中でなければ)
+                const onClickAttr = !isCurrent ? `onclick="window.appAPI.switchSite('${site.id}')"` : '';
+
+                return `
+                    <div ${onClickAttr} class="p-3 border-2 rounded-xl flex items-center justify-between mb-2 ${borderClass}">
+                        <div class="flex-1 pr-2">
+                            <div class="flex items-center gap-2 mb-1">
+                                <div class="font-black text-slate-800 text-[16px]">${site.name}</div>
+                                ${isCurrent ? `<span class="text-[10px] font-bold text-blue-600 bg-blue-100 px-2 py-0.5 rounded">選択中</span>` : ''}
+                            </div>
+                            <div class="text-[11px] text-slate-500 space-y-0.5">
+                                <div><span class="font-bold">代理人:</span> ${site.agentName || '未設定'}</div>
+                                <div><span class="font-bold">監理:</span> ${site.supervisorName || '未設定'} / <span class="font-bold">発注:</span> ${site.clientName || '未設定'}</div>
+                            </div>
+                        </div>
+                        <div class="flex flex-col items-end justify-center">
+                            ${deleteBtn}
+                        </div>
+                    </div>
+                `;
+            }).join('');
+            
+            let html = `
+                <!-- 編集モードヘッダー (PCでも幅が広がらないように調整) -->
+                <div class="sticky top-0 z-30 bg-slate-800 shadow-md">
+                    <div class="max-w-md mx-auto flex justify-between items-center p-4">
+                        <button onclick="window.appAPI.cancelEdit()" class="px-3 py-2 font-bold text-slate-300 active:text-white transition-colors text-sm rounded-lg hover:bg-slate-700">
+                            キャンセル
+                        </button>
+                        <span class="text-white font-bold">設定編集</span>
+                        <button onclick="window.appAPI.saveEdit()" class="px-4 py-2 font-bold bg-green-500 text-white rounded-lg shadow-sm active:bg-green-600 transition-colors text-sm">
+                            保存
+                        </button>
+                    </div>
+                </div>
+
+                <div class="max-w-md mx-auto p-4 space-y-6 pt-6">
+                    
+                    <!-- 現場管理セクション -->
+                    <div class="bg-white p-4 rounded-2xl shadow-sm border-2 border-slate-200">
+                        <div class="flex justify-between items-center mb-4">
+                            <h3 class="font-black text-slate-700 text-lg flex items-center gap-2">
+                                現場一覧・切り替え
+                            </h3>
+                            <button onclick="window.appAPI.openNewSiteModal()" class="px-3 py-1.5 bg-blue-100 text-blue-700 font-bold rounded-lg border border-blue-300 active:bg-blue-200 text-sm shadow-sm">
+                                新規作成
+                            </button>
+                        </div>
+                        
+                        <div class="space-y-2 mb-4 max-h-64 overflow-y-auto pr-1">
+                            ${siteListHTML}
+                        </div>
+
+                        <div>
+                            <button onclick="window.appAPI.showQR()" class="w-full bg-slate-800 text-white font-bold py-3 rounded-xl flex justify-center items-center gap-2 active:bg-slate-700 transition-colors shadow-sm">
+                                <svg viewBox="0 0 24 24" class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><rect x="7" y="7" width="3" height="3"></rect><rect x="14" y="7" width="3" height="3"></rect><rect x="7" y="14" width="3" height="3"></rect><rect x="14" y="14" width="3" height="3"></rect></svg>
+                                選択中現場のQRを表示・保存
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- 見たまま編集 (WYSIWYG) エリア -->
+                    <div class="text-center mb-2">
+                        <p class="text-sm font-bold text-blue-600 bg-blue-50 py-3 rounded-xl border border-blue-200 flex items-center justify-center gap-2">
+                            <svg viewBox="0 0 24 24" class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg>
+                            編集したいボタンをタップしてください
+                        </p>
+                    </div>
+
+                    <!-- 上部グリッド -->
+                    <div class="grid grid-cols-2 gap-4">
+                        ${createEditModeButton('fire', data.fire)}
+                        ${createEditModeButton('police', data.police)}
+                        ${createEditModeButton('hospital', data.hospital)}
+                        ${createEditModeButton('electric', data.electric)}
+                        ${createEditModeButton('labor', data.labor)}
+                        ${createEditModeButton('ntt', data.ntt)}
+                        ${createEditModeButton('water', data.water)}
+                    </div>
+
+                    <!-- 工事関係者セクション -->
+                    <div class="mt-8 border-2 border-slate-200 p-4 rounded-2xl bg-white shadow-sm relative">
+                        <h2 class="text-xl font-black mb-4 border-b-2 border-slate-100 pb-2 text-slate-600">工事関係者</h2>
+                        <div class="grid grid-cols-2 gap-4">
+                            ${createEditModeButton('agent', data.agent)}
+                            ${createEditModeButton('company', data.company)}
+                            ${createEditModeButton('supervisor', data.supervisor)}
+                            ${createEditModeButton('client', data.client)}
+                        </div>
+                    </div>
+                    
+                </div>
+            `;
+            return html;
+        }
+
+        // --- Main Render Function ---
+        function renderApp() {
+            const appDiv = document.getElementById('app');
+            if (state.isEditing) {
+                appDiv.innerHTML = renderEditMode();
+            } else {
+                appDiv.innerHTML = renderViewMode();
+            }
+        }
+
+        // --- Interactions (Exported to window.appAPI) ---
+        
+        window.appAPI.handleCallClick = (id) => {
+            const contact = state.contacts[id];
+            if (!contact.number) return;
+            
+            // モーダル表示
+            window.appAPI.currentCallTarget = contact;
+            document.getElementById('modal-name').innerText = contact.name;
+            document.getElementById('modal-number').innerText = contact.number;
+            
+            const modal = document.getElementById('modal');
+            modal.classList.remove('hidden');
+            modal.classList.add('flex');
+        };
+
+        window.appAPI.closeModal = () => {
+            const modal = document.getElementById('modal');
+            modal.classList.add('hidden');
+            modal.classList.remove('flex');
+            window.appAPI.currentCallTarget = null;
+        };
+
+        window.appAPI.executeCall = () => {
+            if (window.appAPI.currentCallTarget && window.appAPI.currentCallTarget.number) {
+                // 自動でハイフンやスペースを除去し、数字だけにして発信する
+                const cleanNumber = window.appAPI.currentCallTarget.number.replace(/[^\d+]/g, '');
+                window.location.href = `tel:${cleanNumber}`;
+            }
+            window.appAPI.closeModal();
+        };
+        
+        // --- モーダルを利用した見たまま編集機能 ---
+        window.appAPI.editingContactId = null;
+
+        window.appAPI.openContactEditModal = (id) => {
+            window.appAPI.editingContactId = id;
+            const contact = state.tempData.contacts[id];
+            const isEmergency = id === 'fire' || id === 'police';
+            const titleEl = document.getElementById('cem-title');
+            const contentEl = document.getElementById('cem-content');
+            
+            titleEl.innerText = `${contact.name} の編集`;
+            
+            let nameInput = contact.editableName !== false ? 
+                `<div>
+                    <label class="block text-sm font-bold text-slate-600 mb-1">表示名</label>
+                    <input type="text" value="${contact.name}" oninput="window.appAPI.updateTempFieldLive('${id}', 'name', this.value)" class="w-full p-2 font-bold border-2 border-slate-300 rounded-xl focus:border-blue-500 outline-none text-sm bg-white">
+                </div>` : 
+                `<div class="font-bold text-slate-700 mb-2 text-sm bg-slate-100 p-2 rounded-xl border border-slate-200">表示名: ${contact.name} (変更不可)</div>`;
+                
+            let personNameInput = id === 'agent' ? 
+                `<div class="mt-3">
+                    <label class="block text-sm font-bold text-slate-600 mb-1">現場代理人 氏名</label>
+                    <input type="text" value="${contact.personName || ''}" oninput="window.appAPI.updateTempFieldLive('${id}', 'personName', this.value)" placeholder="例: 山田太郎" class="w-full p-2 font-bold border-2 border-slate-300 rounded-xl focus:border-blue-500 outline-none text-sm bg-white">
+                </div>` : '';
+
+            let numberInput = !isEmergency ? 
+                `<div class="mt-4">
+                    <label class="block text-sm font-bold text-slate-600 mb-1">電話番号</label>
+                    <input type="tel" value="${contact.number}" oninput="window.appAPI.updateTempFieldLive('${id}', 'number', this.value)" placeholder="ハイフンあり・なし可" class="w-full p-2 font-bold border-2 border-slate-300 rounded-xl focus:border-blue-500 outline-none text-center bg-slate-50">
+                </div>` : 
+                `<div class="mt-4">
+                    <label class="block text-sm font-bold text-slate-600 mb-1">電話番号</label>
+                    <div class="w-full p-2 font-bold border-2 border-slate-200 rounded-xl text-center bg-slate-100 text-slate-500">${contact.number} (変更不可)</div>
+                </div>`;
+
+            let imgScale = contact.imgScale || 1.0;
+            
+            let imgInput = contact.editableImg !== false ? 
+                `<div class="mt-5 p-4 bg-slate-50 rounded-2xl border-2 border-slate-200">
+                    <label class="block text-sm font-bold text-slate-600 mb-2">画像・アイコン</label>
+                    
+                    <div class="flex items-center gap-3 mb-4">
+                        <div class="w-16 h-16 bg-white rounded-xl border-2 border-slate-200 flex items-center justify-center p-1 relative overflow-hidden flex-shrink-0">
+                            <img id="cem-preview-img" src="${contact.img}" class="object-contain" style="transform: scale(${imgScale}); transition: transform 0.1s;" onerror="this.style.display='none';">
+                        </div>
+                        <div class="flex-1">
+                            <label class="inline-block py-3 px-3 bg-blue-100 text-blue-700 border border-blue-200 font-bold text-xs rounded-xl cursor-pointer hover:bg-blue-200 transition-colors w-full text-center shadow-sm">
+                                画像を選択する
+                                <input type="file" accept="image/*" onchange="window.appAPI.handleImageUploadFromModal('${id}', this)" class="hidden">
+                            </label>
+                        </div>
+                    </div>
+                    
+                    <div>
+                        <label class="flex justify-between text-xs font-bold text-slate-500 mb-2">
+                            <span>画像の大きさ調整</span>
+                            <span id="cem-scale-val" class="bg-slate-200 px-2 rounded">${Math.round(imgScale * 100)}%</span>
+                        </label>
+                        <input type="range" id="cem-scale" min="0.5" max="2.5" step="0.1" value="${imgScale}" oninput="window.appAPI.updateImgScale('${id}', this.value)" class="w-full accent-blue-600 h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer">
+                    </div>
+                </div>` : '';
+
+            contentEl.innerHTML = `
+                <div class="">
+                    ${nameInput}
+                    ${personNameInput}
+                    ${numberInput}
+                    ${imgInput}
+                </div>
+            `;
+
+            const modal = document.getElementById('contact-edit-modal');
+            modal.classList.remove('hidden');
+            modal.classList.add('flex');
+        };
+
+        window.appAPI.updateTempFieldLive = (id, field, value) => {
+            state.tempData.contacts[id][field] = value;
+            // 後ろのWYSIWYGエリアを再描画して変更をリアルタイム反映
+            renderApp();
+        };
+
+        window.appAPI.updateImgScale = (id, value) => {
+            const val = parseFloat(value);
+            state.tempData.contacts[id].imgScale = val;
+            
+            // モーダル内のプレビュー画像の大きさを更新
+            const previewImg = document.getElementById('cem-preview-img');
+            if (previewImg) previewImg.style.transform = `scale(${val})`;
+            
+            const scaleVal = document.getElementById('cem-scale-val');
+            if (scaleVal) scaleVal.innerText = `${Math.round(val * 100)}%`;
+
+            // 後ろのWYSIWYGエリアを再描画
+            renderApp();
+        };
+
+        // 画像のアップロード (透過PNGとして保存)
+        window.appAPI.handleImageUploadFromModal = (id, inputElement) => {
+            const file = inputElement.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                const img = new Image();
+                img.onload = () => {
+                    // クラウド容量節約のため、最大300pxに自動リサイズ
+                    const MAX_SIZE = 300;
+                    let width = img.width;
+                    let height = img.height;
+
+                    if (width > height) {
+                        if (width > MAX_SIZE) {
+                            height *= MAX_SIZE / width;
+                            width = MAX_SIZE;
+                        }
+                    } else {
+                        if (height > MAX_SIZE) {
+                            width *= MAX_SIZE / height;
+                            height = MAX_SIZE;
+                        }
+                    }
+
+                    const canvas = document.createElement('canvas');
+                    canvas.width = width;
+                    canvas.height = height;
+                    const ctx = canvas.getContext('2d');
+                    ctx.drawImage(img, 0, 0, width, height);
+
+                    // image/png を指定して透過背景を維持
+                    const dataUrl = canvas.toDataURL('image/png');
+                    
+                    // データを更新
+                    state.tempData.contacts[id].img = dataUrl;
+                    
+                    // モーダル内プレビューを更新
+                    const previewImg = document.getElementById('cem-preview-img');
+                    if(previewImg) {
+                        previewImg.src = dataUrl;
+                        previewImg.style.display = 'block';
+                    }
+                    
+                    // 後ろのWYSIWYGエリアを再描画
+                    renderApp();
+                };
+                img.src = e.target.result;
+            };
+            reader.readAsDataURL(file);
+        };
+
+        window.appAPI.closeContactEditModal = () => {
+            window.appAPI.editingContactId = null;
+            const modal = document.getElementById('contact-edit-modal');
+            modal.classList.add('hidden');
+            modal.classList.remove('flex');
+        };
+
+        window.appAPI.startEdit = () => {
+            state.tempData = JSON.parse(JSON.stringify({
+                siteName: state.siteName,
+                contacts: state.contacts
+            }));
+            state.isEditing = true;
+            window.scrollTo(0, 0);
+            renderApp();
+        };
+
+        window.appAPI.cancelEdit = () => {
+            state.tempData = null;
+            state.isEditing = false;
+            window.scrollTo(0, 0);
+            renderApp();
+        };
+
+        window.appAPI.updateTempField = (id, field, value) => {
+            state.tempData.contacts[id][field] = value;
+        };
+        
+        window.appAPI.updateSiteName = (value) => {
+            state.tempData.siteName = value;
+        };
+
+        window.appAPI.saveEdit = async () => {
+            state.siteName = state.tempData.siteName;
+            state.contacts = JSON.parse(JSON.stringify(state.tempData.contacts));
+            state.isEditing = false;
+            
+            // クラウド保存処理
+            if (db && auth.currentUser) {
+                try {
+                     const siteRef = doc(db, 'artifacts', appId, 'public', 'data', 'sites', state.currentSiteId);
+                     await setDoc(siteRef, {
+                         siteName: state.siteName,
+                         contacts: state.contacts,
+                         updatedAt: new Date().toISOString()
+                     }, { merge: true });
+                     // Available sitesの更新
+                     await fetchAvailableSites();
+                } catch(e) {
+                     console.error("Failed to save to Firestore", e);
+                     alert("クラウドへの保存に失敗しました。ローカルに保存します。");
+                     saveLocal();
+                }
+            } else {
+                saveLocal();
+            }
+            
+            window.scrollTo(0, 0);
+            renderApp();
+        };
+        
+        function saveLocal() {
+            localStorage.setItem(`emergency_data_${state.currentSiteId}`, JSON.stringify({
+                siteName: state.siteName,
+                contacts: state.contacts
+            }));
+            // Update local site list
+            let localList = localStorage.getItem('emergency_sites_list');
+            let sites = localList ? JSON.parse(localList) : [{ id: DEFAULT_SITE_ID, name: 'メイン現場' }];
+            const existingIndex = sites.findIndex(s => s.id === state.currentSiteId);
+            
+            const siteInfo = { 
+                id: state.currentSiteId, 
+                name: state.siteName,
+                agentName: state.contacts.agent?.personName || state.contacts.agent?.name || '',
+                supervisorName: state.contacts.supervisor?.name || '',
+                clientName: state.contacts.client?.name || ''
+            };
+
+            if(existingIndex > -1) {
+                sites[existingIndex] = siteInfo;
+            } else {
+                sites.push(siteInfo);
+            }
+            localStorage.setItem('emergency_sites_list', JSON.stringify(sites));
+            state.availableSites = sites;
+        }
+
+        window.appAPI.switchSite = async (siteId) => {
+            if(siteId === state.currentSiteId) return;
+            
+            // 変更があるか検知
+            const hasChanged = JSON.stringify(state.tempData.contacts) !== JSON.stringify(state.contacts) || state.tempData.siteName !== state.siteName;
+
+            if (hasChanged) {
+                const confirmSwitch = confirm("保存されていない編集内容は破棄されます。よろしいですか？");
+                if(!confirmSwitch) {
+                    return;
+                }
+            }
+            
+            state.currentSiteId = siteId;
+            updateUrlWithSiteId(siteId);
+            
+            appDiv.innerHTML = '<div class="text-center p-10 font-bold text-slate-500">読み込み中...</div>';
+            await fetchSiteData(siteId);
+        };
+        
+        // 現場の削除
+        window.appAPI.deleteSite = async (siteId, siteName) => {
+            if(!confirm(`現場「${siteName}」を削除してもよろしいですか？\nこの操作は取り消せません。`)) return;
+            
+            // クラウドから削除
+            if(db && auth.currentUser) {
+                try {
+                    await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'sites', siteId));
+                } catch(e) {
+                    console.error("Firestore delete error", e);
+                }
+            }
+            
+            // ローカルから削除
+            localStorage.removeItem(`emergency_data_${siteId}`);
+            let localList = localStorage.getItem('emergency_sites_list');
+            if(localList) {
+                let sites = JSON.parse(localList);
+                sites = sites.filter(s => s.id !== siteId);
+                localStorage.setItem('emergency_sites_list', JSON.stringify(sites));
+            }
+            
+            // メモリから削除
+            state.availableSites = state.availableSites.filter(s => s.id !== siteId);
+            renderApp();
+        };
+        
+        // --- 新規現場作成モーダルロジック ---
+        window.appAPI.openNewSiteModal = () => {
+            const modal = document.getElementById('new-site-modal');
+            const select = document.getElementById('new-site-copy-from');
+            const nameInput = document.getElementById('new-site-name');
+            
+            // ドロップダウンの選択肢を更新
+            select.innerHTML = '<option value="">(引用しない - 空のテンプレート)</option>' + 
+                state.availableSites.map(site => `<option value="${site.id}" ${site.id === state.currentSiteId ? 'selected' : ''}>${site.name}</option>`).join('');
+            
+            nameInput.value = ''; // 入力欄をクリア
+            
+            modal.classList.remove('hidden');
+            modal.classList.add('flex');
+        };
+
+        window.appAPI.closeNewSiteModal = () => {
+            const modal = document.getElementById('new-site-modal');
+            modal.classList.add('hidden');
+            modal.classList.remove('flex');
+        };
+
+        window.appAPI.createNewSiteFromModal = async () => {
+            const nameInput = document.getElementById('new-site-name').value;
+            const copyFromId = document.getElementById('new-site-copy-from').value;
+
+            if (!nameInput.trim()) {
+                alert('新規現場名を入力してください。');
+                return;
+            }
+
+            appDiv.innerHTML = '<div class="text-center p-10 font-bold text-slate-500">新規現場を作成中...</div>';
+            window.appAPI.closeNewSiteModal();
+
+            let newContacts = JSON.parse(JSON.stringify(defaultContactsTemplate));
+
+            if (copyFromId) {
+                if (copyFromId === state.currentSiteId) {
+                    newContacts = JSON.parse(JSON.stringify(state.tempData.contacts));
+                } else {
+                    if (db) {
+                        try {
+                            const siteRef = doc(db, 'artifacts', appId, 'public', 'data', 'sites', copyFromId);
+                            const docSnap = await getDoc(siteRef);
+                            if (docSnap.exists()) {
+                                newContacts = mergeWithTemplate(docSnap.data().contacts);
+                            }
+                        } catch(e) {
+                            console.error("Failed to fetch copy target", e);
+                        }
+                    } else {
+                        const localData = localStorage.getItem(`emergency_data_${copyFromId}`);
+                        if (localData) {
+                            newContacts = mergeWithTemplate(JSON.parse(localData).contacts);
+                        }
+                    }
+                }
+            }
+
+            const newSiteId = 'site_' + Date.now();
+            
+            state.currentSiteId = newSiteId;
+            state.siteName = nameInput;
+            state.contacts = JSON.parse(JSON.stringify(newContacts));
+            
+            // クラウドまたはローカルに初期保存
+            if (db && auth.currentUser) {
+                try {
+                     const siteRef = doc(db, 'artifacts', appId, 'public', 'data', 'sites', newSiteId);
+                     await setDoc(siteRef, {
+                         siteName: state.siteName,
+                         contacts: state.contacts,
+                         updatedAt: new Date().toISOString()
+                     }, { merge: true });
+                     await fetchAvailableSites();
+                } catch(e) {
+                     saveLocal();
+                }
+            } else {
+                saveLocal();
+            }
+
+            updateUrlWithSiteId(newSiteId);
+            
+            // 編集モードを継続
+            state.tempData = JSON.parse(JSON.stringify({
+                siteName: state.siteName,
+                contacts: state.contacts
+            }));
+            state.isEditing = true;
+            
+            renderApp();
+            alert(`新規現場「${nameInput}」を作成しました。`);
+        };
+
+        // --- QR Code Logic ---
+        window.appAPI.showQR = () => {
+            const qrModal = document.getElementById('qr-modal');
+            const qrContainer = document.getElementById('qrcode-container');
+            qrContainer.innerHTML = ''; // Clear previous
+            
+            // 現在のURL（クエリパラメータ含む）を取得
+            const currentUrl = window.location.href;
+            
+            // QRコード生成
+            new QRCode(qrContainer, {
+                text: currentUrl,
+                width: 200,
+                height: 200,
+                colorDark : "#000000",
+                colorLight : "#ffffff",
+                correctLevel : QRCode.CorrectLevel.H
+            });
+            
+            qrModal.classList.remove('hidden');
+            qrModal.classList.add('flex');
+        };
+
+        window.appAPI.closeQR = () => {
+            const qrModal = document.getElementById('qr-modal');
+            qrModal.classList.add('hidden');
+            qrModal.classList.remove('flex');
+        };
+        
+        window.appAPI.downloadQR = () => {
+            const qrCanvas = document.querySelector('#qrcode-container canvas');
+            if (qrCanvas) {
+                const imageUrl = qrCanvas.toDataURL("image/png");
+                const downloadLink = document.createElement("a");
+                downloadLink.href = imageUrl;
+                downloadLink.download = `QR_${state.siteName}.png`;
+                document.body.appendChild(downloadLink);
+                downloadLink.click();
+                document.body.removeChild(downloadLink);
+            }
+        };
+
+        // --- App Initialization ---
+        async function initApp() {
+            const urlSiteId = getSiteIdFromUrl();
+            if (urlSiteId) {
+                state.currentSiteId = urlSiteId;
+            }
+
+            // Firebaseの匿名認証（アクセス権限の取得）
+            if (auth) {
+                try {
+                    await signInAnonymously(auth);
+                    state.userId = auth.currentUser.uid;
+                } catch (e) {
+                    console.warn("Authentication failed, falling back to local mode.", e);
+                }
+            }
+
+            // 現場リストとデータを取得して描画開始
+            await fetchAvailableSites();
+            await fetchSiteData(state.currentSiteId);
+        }
+
+        const appDiv = document.getElementById('app');
+        
+        // Start app
+        initApp();
+
+    </script>
+
+    <!-- メインコンテンツをマウントする場所 -->
+    <div id="app">
+        <div class="text-center p-10 font-bold text-slate-500">読み込み中...</div>
+    </div>
+
+    <!-- 発信確認モーダル -->
+    <div id="modal" class="hidden fixed inset-0 bg-slate-900 bg-opacity-50 backdrop-blur-sm items-center justify-center z-50 p-4">
+        <div class="bg-white p-6 rounded-3xl shadow-2xl max-w-sm w-full text-center border border-slate-100">
+            <h3 id="modal-name" class="text-2xl font-black mb-2 text-slate-800">名称</h3>
+            <p id="modal-number" class="text-xl font-bold mb-6 text-slate-500 tracking-widest">番号</p>
+            <p class="font-bold mb-8 text-lg text-slate-700">こちらに発信します。<br/>よろしいですか？</p>
+            <div class="flex space-x-4">
+                <button onclick="window.appAPI.closeModal()" class="flex-1 py-4 font-bold bg-slate-100 text-slate-600 rounded-xl shadow-[0_4px_0_#cbd5e1] active:translate-y-1 active:shadow-none transition-all">
+                    キャンセル
+                </button>
+                <button onclick="window.appAPI.executeCall()" class="flex-1 py-4 font-bold text-white bg-blue-600 rounded-xl shadow-[0_4px_0_#1e40af] active:translate-y-1 active:shadow-none transition-all">
+                    発信
+                </button>
+            </div>
+        </div>
+    </div>
+    
+    <!-- QRコード表示モーダル -->
+    <div id="qr-modal" class="hidden fixed inset-0 bg-slate-900 bg-opacity-70 backdrop-blur-sm items-center justify-center z-50 p-4">
+        <div class="bg-white p-6 rounded-3xl shadow-2xl max-w-sm w-full text-center flex flex-col items-center">
+            <h3 class="text-xl font-black mb-2 text-slate-800">この現場を共有</h3>
+            <p class="text-sm text-slate-500 mb-6">カメラで読み取るとこの現場の<br>緊急連絡先が開きます</p>
+            
+            <div id="qrcode-container" class="bg-white p-4 border-2 border-slate-200 rounded-2xl mb-6"></div>
+            
+            <div class="w-full space-y-3">
+                <button onclick="window.appAPI.downloadQR()" class="w-full py-4 font-bold text-white bg-green-600 rounded-xl shadow-[0_4px_0_#166534] active:translate-y-1 active:shadow-none transition-all flex justify-center items-center gap-2">
+                    <svg viewBox="0 0 24 24" class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+                    画像を保存
+                </button>
+                <button onclick="window.appAPI.closeQR()" class="w-full py-4 font-bold bg-slate-200 text-slate-700 rounded-xl shadow-[0_4px_0_#94a3b8] active:translate-y-1 active:shadow-none transition-all">
+                    閉じる
+                </button>
+            </div>
+        </div>
+    </div>
+    
+    <!-- 新規現場作成モーダル -->
+    <div id="new-site-modal" class="hidden fixed inset-0 bg-slate-900 bg-opacity-70 backdrop-blur-sm items-center justify-center z-50 p-4">
+        <div class="bg-white p-6 rounded-3xl shadow-2xl max-w-sm w-full border border-slate-100">
+            <h3 class="text-xl font-black mb-4 text-slate-800 text-center">新規現場の作成</h3>
+            
+            <div class="mb-4">
+                <label class="block text-sm font-bold text-slate-600 mb-2">新規現場名</label>
+                <input type="text" id="new-site-name" placeholder="例: 〇〇新築工事" class="w-full p-3 font-bold border-2 border-slate-300 rounded-xl focus:border-blue-500 outline-none bg-slate-50">
+            </div>
+
+            <div class="mb-8">
+                <label class="block text-sm font-bold text-slate-600 mb-2">連絡先を引用する現場</label>
+                <select id="new-site-copy-from" class="w-full p-3 border-2 border-slate-300 rounded-xl bg-white font-bold text-slate-700 outline-none">
+                    <!-- JSで動的に追加されます -->
+                </select>
+                <p class="text-xs text-slate-400 mt-2">※選択した現場の連絡先や画像の設定をコピーして作成します。</p>
+            </div>
+            
+            <div class="flex space-x-3">
+                <button onclick="window.appAPI.closeNewSiteModal()" class="flex-1 py-3 font-bold bg-slate-200 text-slate-700 rounded-xl shadow-sm active:bg-slate-300 transition-colors">
+                    キャンセル
+                </button>
+                <button onclick="window.appAPI.createNewSiteFromModal()" class="flex-1 py-3 font-bold text-white bg-blue-600 rounded-xl shadow-sm active:bg-blue-700 transition-colors">
+                    作成して保存
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 連絡先個別設定モーダル (見たまま編集用) -->
+    <div id="contact-edit-modal" class="hidden fixed inset-0 bg-slate-900 bg-opacity-70 backdrop-blur-sm items-center justify-center z-50 p-4">
+        <div class="bg-white p-5 rounded-3xl shadow-2xl max-w-sm w-full border border-slate-100 flex flex-col max-h-[90vh]">
+            <div class="flex justify-between items-center mb-4">
+                <h3 class="text-lg font-black text-slate-800" id="cem-title">連絡先の編集</h3>
+                <button onclick="window.appAPI.closeContactEditModal()" class="text-slate-400 hover:text-slate-600 bg-slate-100 p-2 rounded-full transition-colors">
+                    <svg viewBox="0 0 24 24" class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                </button>
+            </div>
+            
+            <div class="overflow-y-auto pr-1 pb-2 flex-1" id="cem-content">
+                <!-- JSで動的に中身が生成されます -->
+            </div>
+
+            <div class="mt-4 pt-4 border-t border-slate-100">
+                <button onclick="window.appAPI.closeContactEditModal()" class="w-full py-4 font-bold text-white bg-blue-600 rounded-xl shadow-[0_4px_0_#1e40af] active:translate-y-1 active:shadow-none transition-all">
+                    完了して閉じる
+                </button>
+            </div>
+        </div>
+    </div>
+
+</body>
+</html>
